@@ -48,7 +48,11 @@ workers = 4
 ; valid arl cookie value
 ; login manually using your web browser and take the arl cookie
 cookie_arl = [a-f0-9]{192}
-; mp3 or flac - flac needs premium subscription
+; mp3, mp3_128, mp3_320, or flac
+; - mp3: backward compatible, defaults to best available (mp3_320 for premium, mp3_128 for free)
+; - mp3_128: 128 kbit/s MP3 (available for all accounts)
+; - mp3_320: 320 kbit/s MP3 (requires premium subscription)
+; - flac: lossless FLAC (requires premium subscription)
 quality = mp3
 
 [youtubedl]

@@ -4,6 +4,7 @@ from os.path import basename
 import mpd
 import platform
 from zipfile import ZipFile, ZIP_DEFLATED
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from deezer_downloader.configuration import config
 from deezer_downloader.youtubedl import youtubedl_download
@@ -116,6 +117,41 @@ def download_song_and_get_absolute_filename(search_type, song, playlist_name=Non
     return absolute_filename
 
 
+def _download_song_wrapper(search_type, song, playlist_name=None):
+    """Helper function for parallel downloads. Returns (success, absolute_filename, error)."""
+    try:
+        assert type(song) is dict
+        absolute_filename = download_song_and_get_absolute_filename(search_type, song, playlist_name)
+        return (True, absolute_filename, None)
+    except Exception as e:
+        return (False, None, e)
+
+
+def _download_spotify_song_wrapper(song_of_playlist, playlist_name):
+    """Helper function for parallel Spotify downloads. Does search -> get info -> download.
+    Returns (success, absolute_filename, error, song_name)."""
+    try:
+        track_id = deezer_search(song_of_playlist, TYPE_TRACK)[0]['id']  # [0] can throw IndexError
+        song = get_song_infos_from_deezer_website(TYPE_TRACK, track_id)
+        absolute_filename = download_song_and_get_absolute_filename(TYPE_PLAYLIST, song, playlist_name)
+        return (True, absolute_filename, None, song_of_playlist)
+    except Exception as e:
+        return (False, None, e, song_of_playlist)
+
+
+def _download_favorite_song_wrapper(fav_song, output_directory):
+    """Helper function for parallel favorites downloads. Does get info -> download.
+    Returns (success, absolute_filename, error, track_id)."""
+    try:
+        song = get_song_infos_from_deezer_website(TYPE_TRACK, fav_song)
+        absolute_filename = download_song_and_get_absolute_filename(TYPE_PLAYLIST, song, output_directory)
+        return (True, absolute_filename, None, fav_song)
+    except (IndexError, Deezer403Exception, Deezer404Exception) as msg:
+        return (False, None, msg, fav_song)
+    except Exception as e:
+        return (False, None, e, fav_song)
+
+
 def create_zip_file(songs_absolute_location):
     # take first song in list and take the parent dir (name of album/playlist")
     parent_dir = basename(os.path.dirname(songs_absolute_location[0]))
@@ -163,14 +199,27 @@ def download_deezer_song_and_queue(track_id, add_to_playlist):
 def download_deezer_album_and_queue_and_zip(album_id, add_to_playlist, create_zip):
     songs = get_song_infos_from_deezer_website(TYPE_ALBUM, album_id)
     songs_absolute_location = []
-    for i, song in enumerate(songs):
-        report_progress(i, len(songs))
-        assert type(song) is dict
-        try:
-            absolute_filename = download_song_and_get_absolute_filename(TYPE_ALBUM, song)
-            songs_absolute_location.append(absolute_filename)
-        except Exception as e:
-            print(f"Warning: {e}. Continuing with album...")
+    num_workers = config.getint('threadpool', 'workers')
+    
+    # Download songs in parallel
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all download tasks
+        future_to_song = {
+            executor.submit(_download_song_wrapper, TYPE_ALBUM, song): song 
+            for song in songs
+        }
+        
+        # Process completed downloads as they finish
+        completed = 0
+        for future in as_completed(future_to_song):
+            completed += 1
+            report_progress(completed, len(songs))
+            success, absolute_filename, error = future.result()
+            if success:
+                songs_absolute_location.append(absolute_filename)
+            else:
+                print(f"Warning: {error}. Continuing with album...")
+    
     update_mpd_db(songs_absolute_location, add_to_playlist)
     if create_zip:
         return [create_zip_file(songs_absolute_location)]
@@ -181,13 +230,27 @@ def download_deezer_album_and_queue_and_zip(album_id, add_to_playlist, create_zi
 def download_deezer_playlist_and_queue_and_zip(playlist_id, add_to_playlist, create_zip):
     playlist_name, songs = parse_deezer_playlist(playlist_id)
     songs_absolute_location = []
-    for i, song in enumerate(songs):
-        report_progress(i, len(songs))
-        try:
-            absolute_filename = download_song_and_get_absolute_filename(TYPE_PLAYLIST, song, playlist_name)
-            songs_absolute_location.append(absolute_filename)
-        except Exception as e:
-            print(f"Warning: {e}. Continuing with playlist...")
+    num_workers = config.getint('threadpool', 'workers')
+    
+    # Download songs in parallel
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all download tasks
+        future_to_song = {
+            executor.submit(_download_song_wrapper, TYPE_PLAYLIST, song, playlist_name): song 
+            for song in songs
+        }
+        
+        # Process completed downloads as they finish
+        completed = 0
+        for future in as_completed(future_to_song):
+            completed += 1
+            report_progress(completed, len(songs))
+            success, absolute_filename, error = future.result()
+            if success:
+                songs_absolute_location.append(absolute_filename)
+            else:
+                print(f"Warning: {error}. Continuing with playlist...")
+    
     update_mpd_db(songs_absolute_location, add_to_playlist)
     songs_with_m3u8_file = create_m3u8_file(songs_absolute_location)
     if create_zip:
@@ -200,17 +263,28 @@ def download_spotify_playlist_and_queue_and_zip(playlist_name, playlist_id, add_
     songs = get_songs_from_spotify_website(playlist_id,
                                            config["proxy"]["server"])
     songs_absolute_location = []
+    num_workers = config.getint('threadpool', 'workers')
     print(f"We got {len(songs)} songs from the Spotify playlist")
-    for i, song_of_playlist in enumerate(songs):
-        report_progress(i, len(songs))
-        # song_of_playlist: string (artist - song)
-        try:
-            track_id = deezer_search(song_of_playlist, TYPE_TRACK)[0]['id'] #[0] can throw IndexError
-            song = get_song_infos_from_deezer_website(TYPE_TRACK, track_id)
-            absolute_filename = download_song_and_get_absolute_filename(TYPE_PLAYLIST, song, playlist_name)
-            songs_absolute_location.append(absolute_filename)
-        except Exception as e:
-            print(f"Warning: Could not download Spotify song ({song_of_playlist}) on Deezer: {e}")
+    
+    # Download songs in parallel (search -> get info -> download)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all download tasks
+        future_to_song = {
+            executor.submit(_download_spotify_song_wrapper, song_of_playlist, playlist_name): song_of_playlist 
+            for song_of_playlist in songs
+        }
+        
+        # Process completed downloads as they finish
+        completed = 0
+        for future in as_completed(future_to_song):
+            completed += 1
+            report_progress(completed, len(songs))
+            success, absolute_filename, error, song_name = future.result()
+            if success:
+                songs_absolute_location.append(absolute_filename)
+            else:
+                print(f"Warning: Could not download Spotify song ({song_name}) on Deezer: {error}")
+    
     update_mpd_db(songs_absolute_location, add_to_playlist)
     songs_with_m3u8_file = create_m3u8_file(songs_absolute_location)
     if create_zip:
@@ -232,18 +306,31 @@ def download_deezer_favorites(user_id: str, add_to_playlist: bool, create_zip: b
     songs_absolute_location = []
     output_directory = f"favorites_{user_id}"
     favorite_songs = get_deezer_favorites(user_id)
-    for i, fav_song in enumerate(favorite_songs):
-        report_progress(i, len(favorite_songs))
-        try:
-            song = get_song_infos_from_deezer_website(TYPE_TRACK, fav_song)
-            try:
-                absolute_filename = download_song_and_get_absolute_filename(TYPE_PLAYLIST, song, output_directory)
+    num_workers = config.getint('threadpool', 'workers')
+    
+    # Download songs in parallel
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all download tasks
+        future_to_song = {
+            executor.submit(_download_favorite_song_wrapper, fav_song, output_directory): fav_song 
+            for fav_song in favorite_songs
+        }
+        
+        # Process completed downloads as they finish
+        completed = 0
+        for future in as_completed(future_to_song):
+            completed += 1
+            report_progress(completed, len(favorite_songs))
+            success, absolute_filename, error, track_id = future.result()
+            if success:
                 songs_absolute_location.append(absolute_filename)
-            except Exception as e:
-                print(f"Warning: {e}. Continuing with favorties...")
-        except (IndexError, Deezer403Exception, Deezer404Exception) as msg:
-            print(msg)
-            print(f"Could not find song ({fav_song}) on Deezer?")
+            else:
+                if isinstance(error, (IndexError, Deezer403Exception, Deezer404Exception)):
+                    print(str(error))
+                    print(f"Could not find song ({track_id}) on Deezer?")
+                else:
+                    print(f"Warning: {error}. Continuing with favorites...")
+    
     update_mpd_db(songs_absolute_location, add_to_playlist)
     songs_with_m3u8_file = create_m3u8_file(songs_absolute_location)
     if create_zip:

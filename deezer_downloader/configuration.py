@@ -45,8 +45,8 @@ def load_config(config_abs):
         config["deezer"]["quality"] = os.environ["DEEZER_QUALITY"]
         
     if "quality" in config['deezer']:
-        if config['deezer']["quality"] not in ("mp3", "flac"):
-            print("ERROR: quality must be mp3 or flac in config file")
+        if config['deezer']["quality"] not in ("mp3", "mp3_128", "mp3_320", "flac"):
+            print("ERROR: quality must be mp3, mp3_128, mp3_320, or flac in config file")
             sys.exit(1)
     else:
         print("Warning: quality not set in config file. Using mp3")

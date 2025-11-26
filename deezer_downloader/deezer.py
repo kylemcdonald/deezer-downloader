@@ -50,14 +50,30 @@ def get_user_data() -> tuple[str, str]:
 def set_song_quality(quality_config: str, web_sound_quality: dict):
     global sound_format
     flac_supported = web_sound_quality['lossless'] is True
-    if flac_supported:
-        if quality_config == "flac":
+    
+    if quality_config == "flac":
+        if flac_supported:
             sound_format = "FLAC"
         else:
+            print("WARNING: flac quality is configured in config file but not supported (no premium subscription?). Falling back to mp3_128")
+            sound_format = "MP3_128"
+    elif quality_config == "mp3_320":
+        if flac_supported:
             sound_format = "MP3_320"
+        else:
+            print("WARNING: mp3_320 quality is configured but not supported (no premium subscription?). Falling back to mp3_128")
+            sound_format = "MP3_128"
+    elif quality_config == "mp3_128":
+        sound_format = "MP3_128"
+    elif quality_config == "mp3":
+        # Backward compatibility: default to best available MP3 quality
+        if flac_supported:
+            sound_format = "MP3_320"
+        else:
+            sound_format = "MP3_128"
     else:
-        if quality_config == "flac":
-            print("WARNING: flac quality is configured in config file but not supported (no premium subscription?). Falling back to mp3")
+        # Fallback for unexpected values
+        print(f"WARNING: Unknown quality '{quality_config}'. Falling back to mp3_128")
         sound_format = "MP3_128"
 
 
